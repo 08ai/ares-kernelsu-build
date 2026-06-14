@@ -1,0 +1,284 @@
+name: Build KernelSU Kernel (ares)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: 安装依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flex bison bc cpio xz-utils libssl-dev libelf-dev python3 ccache
+
+      - name: 克隆内核源码
+        run: |
+          git clone --depth=1 -b S https://github.com/Tkpointz/kernel_xiaomi_ares-s.git kernel
+          cd kernel
+          echo "内核版本:"
+          head -5 Makefile
+
+      - name: 安装 Proton Clang 13.0.0
+        run: |
+          cd kernel
+          git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang
+          echo "Proton Clang 版本:"
+          clang/bin/clang --version
+
+      - name: 集成 KernelSU v0.9.5
+        run: |
+          cd kernel
+          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s v0.9.5
+          echo "✓ KernelSU 已集成"
+
+      - name: Patch 内核源码
+        run: |
+          cd kernel
+
+          echo "=== Patching fs/exec.c ==="
+          python3 << 'PYEOF'
+          import re
+          with open('fs/exec.c', 'r') as f:
+              content = f.read()
+
+          extern_block = '''#ifdef CONFIG_KSU
+          extern bool ksu_execveat_hook __read_mostly;
+          extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);
+          extern int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);
+          #endif
+          '''
+
+          hook = '''	#ifdef CONFIG_KSU
+          	if (unlikely(ksu_execveat_hook))
+          		ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
+          	else
+          		ksu_handle_execveat_sucompat(&fd, &filename, &argv, &envp, &flags);
+          	#endif
+          '''
+
+          # Find do_execveat_common function
+          func_match = re.search(r'static int (do_execveat_common|do_execveat)\s*\([^)]*\)\s*\{', content)
+          if func_match:
+              func_name = func_match.group(1)
+              print(f"  Found: {func_name} at offset {func_match.start()}")
+              func_start = func_match.end()
+              depth = 1; pos = func_start; last_return = -1
+              while depth > 0 and pos < len(content):
+                  if content[pos] == '{': depth += 1
+                  elif content[pos] == '}': depth -= 1
+                  elif content[pos:pos+7] == 'return ': last_return = pos
+                  pos += 1
+              if last_return > 0:
+                  # Add extern before function
+                  content = content[:func_match.start()] + extern_block + '\n' + content[func_match.start():]
+                  # Recalculate last_return after insertion
+                  offset = len(extern_block) + 1
+                  last_return += offset
+                  content = content[:last_return] + hook + '\n' + content[last_return:]
+                  with open('fs/exec.c', 'w') as f: f.write(content)
+                  print(f"  ✓ Patched {func_name}")
+              else:
+                  print("  ⚠ Could not find return statement")
+          else:
+              print("  ⚠ Function not found")
+          PYEOF
+
+          echo "=== Patching fs/open.c ==="
+          python3 << 'PYEOF'
+          with open('fs/open.c', 'r') as f: content = f.read()
+          extern_decl = '''#ifdef CONFIG_KSU
+          extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);
+          #endif
+          '''
+          hook_call = '''	#ifdef CONFIG_KSU
+          	ksu_handle_faccessat(&dfd, &filename, &mode, NULL);
+          	#endif
+          '''
+          patched = False
+          for func in ['do_faccessat', 'SYSCALL_DEFINE3(faccessat']:
+              if func.startswith('SYSCALL'):
+                  idx = content.find(func)
+              else:
+                  import re
+                  m = re.search(r'(?:int|long)\s+' + func + r'\s*\(', content)
+                  idx = m.start() if m else -1
+              if idx > 0:
+                  content = content[:idx] + extern_decl + '\n' + content[idx:]
+                  brace = content.find('{', idx + len(extern_decl) + 1)
+                  if brace > 0:
+                      content = content[:brace+1] + '\n' + hook_call + content[brace+1:]
+                      patched = True; print(f"  ✓ Patched {func}"); break
+          if not patched: print("  ⚠ Could not find faccessat")
+          with open('fs/open.c', 'w') as f: f.write(content)
+          PYEOF
+
+          echo "=== Patching fs/read_write.c ==="
+          python3 << 'PYEOF'
+          with open('fs/read_write.c', 'r') as f: content = f.read()
+          extern_decl = '''#ifdef CONFIG_KSU
+          extern bool ksu_vfs_read_hook __read_mostly;
+          extern int ksu_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr, size_t *count_ptr, loff_t **pos);
+          #endif
+          '''
+          hook = '''	#ifdef CONFIG_KSU
+          	if (unlikely(ksu_vfs_read_hook))
+          		ksu_handle_vfs_read(&file, &buf, &count, &pos);
+          	#endif
+          '''
+          idx = content.find('ssize_t vfs_read(')
+          if idx > 0:
+              content = content[:idx] + extern_decl + '\n' + content[idx:]
+              brace = content.find('{', idx + len(extern_decl) + 1)
+              if brace > 0:
+                  content = content[:brace+1] + '\n' + hook + content[brace+1:]
+                  print("  ✓ Patched vfs_read")
+          else: print("  ⚠ vfs_read not found")
+          with open('fs/read_write.c', 'w') as f: f.write(content)
+          PYEOF
+
+          echo "=== Patching fs/stat.c ==="
+          python3 << 'PYEOF'
+          with open('fs/stat.c', 'r') as f: content = f.read()
+          extern_decl = '''#ifdef CONFIG_KSU
+          extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);
+          #endif
+          '''
+          hook = '''	#ifdef CONFIG_KSU
+          	ksu_handle_stat(&dfd, &filename, &flags);
+          	#endif
+          '''
+          patched = False
+          for func in ['vfs_statx', 'vfs_fstatat']:
+              idx = content.find(f'int {func}(')
+              if idx < 0: idx = content.find(f'static int {func}(')
+              if idx > 0:
+                  content = content[:idx] + extern_decl + '\n' + content[idx:]
+                  brace = content.find('{', idx + len(extern_decl) + 1)
+                  if brace > 0:
+                      content = content[:brace+1] + '\n' + hook + content[brace+1:]
+                      print(f"  ✓ Patched {func}"); patched = True; break
+          if not patched: print("  ⚠ Neither vfs_statx nor vfs_fstatat found")
+          with open('fs/stat.c', 'w') as f: f.write(content)
+          PYEOF
+
+          echo "=== Patching drivers/input/input.c ==="
+          python3 << 'PYEOF'
+          with open('drivers/input/input.c', 'r') as f: content = f.read()
+          extern_decl = '''#ifdef CONFIG_KSU
+          extern bool ksu_input_hook __read_mostly;
+          extern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);
+          #endif
+          '''
+          hook = '''	#ifdef CONFIG_KSU
+          	if (unlikely(ksu_input_hook))
+          		ksu_handle_input_handle_event(&type, &code, &value);
+          	#endif
+          '''
+          idx = content.find('input_handle_event(')
+          if idx > 0:
+              func_start = content.rfind('\n', 0, idx)
+              content = content[:func_start+1] + extern_decl + '\n' + content[func_start+1:]
+              idx = content.find('input_handle_event(')
+              brace = content.find('{', idx)
+              disp = content.find('disposition', brace)
+              if disp > brace:
+                  nl = content.find('\n', disp)
+                  content = content[:nl+1] + hook + '\n' + content[nl+1:]
+              else:
+                  content = content[:brace+1] + '\n' + hook + content[brace+1:]
+              print("  ✓ Patched input_handle_event")
+          else: print("  ⚠ input_handle_event not found")
+          with open('drivers/input/input.c', 'w') as f: f.write(content)
+          PYEOF
+
+          echo "=== Patching fs/devpts/inode.c ==="
+          python3 << 'PYEOF'
+          with open('fs/devpts/inode.c', 'r') as f: content = f.read()
+          idx = content.find('devpts_get_priv(')
+          if idx > 0:
+              func_start = content.rfind('\n', 0, idx)
+              extern_decl = 'extern int ksu_handle_devpts(struct inode*);\n'
+              content = content[:func_start+1] + extern_decl + content[func_start+1:]
+              idx = content.find('devpts_get_priv(')
+              brace = content.find('{', idx)
+              content = content[:brace+1] + '\n\tksu_handle_devpts(dentry->d_inode);\n' + content[brace+1:]
+              print("  ✓ Patched devpts_get_priv")
+          else: print("  ⚠ devpts_get_priv not found")
+          with open('fs/devpts/inode.c', 'w') as f: f.write(content)
+          PYEOF
+
+          echo "✓ 所有 patch 完成"
+
+      - name: 配置 defconfig
+        run: |
+          cd kernel
+          DEFCONFIG="arch/arm64/configs/ares_user_defconfig"
+
+          if ! grep -q "CONFIG_KSU" "$DEFCONFIG"; then
+            echo "# KernelSU" >> "$DEFCONFIG"
+            echo "CONFIG_KSU=y" >> "$DEFCONFIG"
+          else
+            sed -i 's/.*CONFIG_KSU.*/CONFIG_KSU=y/' "$DEFCONFIG"
+          fi
+
+          # Disable KPROBES for manual integration
+          if grep -q "CONFIG_KPROBES=y" "$DEFCONFIG"; then
+            sed -i 's/CONFIG_KPROBES=y/# CONFIG_KPROBES is not set/' "$DEFCONFIG"
+          fi
+
+          echo "✓ defconfig 已配置"
+
+      - name: 编译内核
+        run: |
+          cd kernel
+          mkdir -p out
+
+          export PATH="${PWD}/clang/bin:${PATH}"
+
+          echo "生成 .config..."
+          make O=out ARCH=arm64 ares_user_defconfig
+
+          echo "开始编译..."
+          make O=out -j$(nproc) \
+            ARCH=arm64 \
+            CC=clang \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            STRIP=llvm-strip \
+            CONFIG_NO_ERROR_ON_MISMATCH=y \
+            2>&1 | tee out/build.log
+
+          if [ -f out/arch/arm64/boot/Image.gz-dtb ]; then
+            echo "✅ 编译成功!"
+            ls -lh out/arch/arm64/boot/Image.gz-dtb
+          else
+            echo "❌ 编译失败!"
+            tail -100 out/build.log
+            exit 1
+          fi
+
+      - name: 上传内核
+        uses: actions/upload-artifact@v4
+        with:
+          name: Image.gz-dtb-ares-KernelSU
+          path: kernel/out/arch/arm64/boot/Image.gz-dtb
+          retention-days: 7
+
+      - name: 上传编译日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: kernel/out/build.log
+          retention-days: 7
