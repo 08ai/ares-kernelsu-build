@@ -238,14 +238,21 @@ jobs:
           cd kernel
           mkdir -p out
 
-          export PATH="${PWD}/clang/bin:${PATH}"
+          CLANG_DIR="${PWD}/clang/bin"
+          export PATH="${CLANG_DIR}:${PATH}"
 
           echo "生成 .config..."
-          make O=out ARCH=arm64 ares_user_defconfig
+          # Use system gcc for host tools, Proton Clang only for kernel target
+          make O=out ARCH=arm64 \
+            HOSTCC=gcc \
+            CC=clang \
+            ares_user_defconfig
 
           echo "开始编译..."
           make O=out -j$(nproc) \
             ARCH=arm64 \
+            HOSTCC=gcc \
+            HOSTLD=ld \
             CC=clang \
             CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-gnu- \
