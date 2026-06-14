@@ -63,6 +63,18 @@ jobs:
           echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> "$DEFCONFIG"
           echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> "$DEFCONFIG"
 
+          # 关键：确保 Kconfig 引用 KernelSU-SUSFS 的配置项
+          # setup.sh 可能遗漏，手动补上
+          KCONFIG="arch/arm64/Kconfig"
+          if ! grep -q "KernelSU/kernel/Kconfig" "$KCONFIG"; then
+            echo "" >> "$KCONFIG"
+            echo '# KernelSU-SUSFS' >> "$KCONFIG"
+            echo 'source "KernelSU/kernel/Kconfig"' >> "$KCONFIG"
+            echo "→ 已添加 Kconfig source 引用"
+          else
+            echo "→ Kconfig source 已存在"
+          fi
+
           echo "✓ defconfig 已配置 (SUSFS模式)"
           echo "已添加的 SUSFS 配置:"
           grep "CONFIG_KSU" "$DEFCONFIG"
