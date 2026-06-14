@@ -238,31 +238,29 @@ jobs:
           cd kernel
           mkdir -p out
 
-          CLANG_DIR="${PWD}/clang/bin"
-          export PATH="${CLANG_DIR}:${PATH}"
+          # 使用绝对路径，不污染 PATH —— 避免 gcc 的 collect2 拿到 Proton 的 ld
+          CL="${PWD}/clang/bin"
 
           echo "生成 .config..."
-          # Use system gcc for host tools, Proton Clang only for kernel target
           make O=out ARCH=arm64 \
             HOSTCC=gcc \
-            CC=clang \
+            CC="${CL}/clang" \
             ares_user_defconfig
 
           echo "开始编译..."
           make O=out -j$(nproc) \
             ARCH=arm64 \
             HOSTCC=gcc \
-            HOSTLD=ld \
-            CC=clang \
+            CC="${CL}/clang" \
             CLANG_TRIPLE=aarch64-linux-gnu- \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            LD=ld.lld \
-            AR=llvm-ar \
-            NM=llvm-nm \
-            OBJCOPY=llvm-objcopy \
-            OBJDUMP=llvm-objdump \
-            STRIP=llvm-strip \
+            CROSS_COMPILE="${CL}/aarch64-linux-gnu-" \
+            CROSS_COMPILE_ARM32="${CL}/arm-linux-gnueabi-" \
+            LD="${CL}/ld.lld" \
+            AR="${CL}/llvm-ar" \
+            NM="${CL}/llvm-nm" \
+            OBJCOPY="${CL}/llvm-objcopy" \
+            OBJDUMP="${CL}/llvm-objdump" \
+            STRIP="${CL}/llvm-strip" \
             CONFIG_NO_ERROR_ON_MISMATCH=y \
             2>&1 | tee out/build.log
 
