@@ -76,10 +76,7 @@ jobs:
             echo "" >> "$KCONFIG"
             echo 'source "KernelSU/kernel/Kconfig"' >> "$KCONFIG"
           fi
-          # 也要引用 fs/Kconfig 中的 SUSFS 选项
-          if ! grep -q "fs/susfs" "$KCONFIG"; then
-            echo 'source "fs/Kconfig.susfs"' >> "$KCONFIG" 2>/dev/null || true
-          fi
+          echo "Kconfig already has KSU source"
 
           # 配置选项
           echo "# KernelSU + SUSFS (Manual Hook Mode)" >> "$DEFCONFIG"
