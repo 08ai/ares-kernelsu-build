@@ -1,4 +1,4 @@
-name: Build KernelSU Kernel (ares) - kprobe
+name: Build KernelSU-SUSFS for ares (kprobe-less)
 
 on:
   workflow_dispatch:
@@ -30,41 +30,44 @@ jobs:
           echo "Proton Clang 版本:"
           clang/bin/clang --version
 
-      - name: 集成 KernelSU v0.9.5
+      - name: 集成 KernelSU-SUSFS
         run: |
           cd kernel
-          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s v0.9.5
-          echo "✓ KernelSU 已集成"
+          # 使用 SUSFS fork，不是原版 KernelSU
+          curl -LSs "https://raw.githubusercontent.com/5ec1cff/KernelSU/main/kernel/setup.sh" | bash
+          echo "✓ KernelSU-SUSFS 已集成"
 
-      - name: 配置 defconfig (kprobe模式)
+      - name: 配置 defconfig (SUSFS模式)
         run: |
           cd kernel
           DEFCONFIG="arch/arm64/configs/ares_user_defconfig"
 
-          # 添加 KSU
+          # 基础 KSU
           if ! grep -q "CONFIG_KSU" "$DEFCONFIG"; then
-            echo "# KernelSU kprobe mode" >> "$DEFCONFIG"
+            echo "# KernelSU-SUSFS" >> "$DEFCONFIG"
             echo "CONFIG_KSU=y" >> "$DEFCONFIG"
-          else
-            sed -i 's/.*CONFIG_KSU.*/CONFIG_KSU=y/' "$DEFCONFIG"
           fi
 
-          # ⚠️ 不关 KPROBES — 用 kprobe 模式，不是手动 patch
-          # 确保 kprobe 相关配置开启
-          if ! grep -q "CONFIG_KPROBES=y" "$DEFCONFIG"; then
-            echo "CONFIG_KPROBES=y" >> "$DEFCONFIG"
-          fi
-          if ! grep -q "CONFIG_HAVE_KPROBES=y" "$DEFCONFIG"; then
-            echo "CONFIG_HAVE_KPROBES=y" >> "$DEFCONFIG"
-          fi
-          if ! grep -q "CONFIG_KPROBE_EVENTS=y" "$DEFCONFIG"; then
-            echo "CONFIG_KPROBE_EVENTS=y" >> "$DEFCONFIG"
-          fi
-          if ! grep -q "CONFIG_MODULES=y" "$DEFCONFIG"; then
-            echo "CONFIG_MODULES=y" >> "$DEFCONFIG"
-          fi
+          # SUSFS 核心配置 (13项，来自能用的 boot.img)
+          cat >> "$DEFCONFIG" << 'EOF'
+CONFIG_KSU_SUSFS=y
+CONFIG_KSU_SUSFS_SUS_PATH=y
+CONFIG_KSU_SUSFS_SUS_MOUNT=y
+CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
+CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
+CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y
+CONFIG_KSU_SUSFS_SUS_KSTAT=y
+CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+CONFIG_KSU_SUSFS_TRY_UMOUNT=y
+CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
+CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
+CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
+CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+EOF
 
-          echo "✓ defconfig 已配置 (kprobe模式, KPROBES保持开启)"
+          echo "✓ defconfig 已配置 (SUSFS模式)"
+          echo "已添加的 SUSFS 配置:"
+          grep "CONFIG_KSU" "$DEFCONFIG"
 
       - name: 编译内核
         run: |
@@ -78,6 +81,9 @@ jobs:
             HOSTCC=gcc \
             CC="${CL}/clang" \
             ares_user_defconfig
+
+          echo "验证 SUSFS 配置..."
+          grep "CONFIG_KSU" out/.config
 
           echo "开始编译..."
           make O=out -j$(nproc) \
@@ -99,6 +105,7 @@ jobs:
           if [ -f out/arch/arm64/boot/Image.gz ]; then
             echo "✅ 编译成功!"
             ls -lh out/arch/arm64/boot/Image.gz
+            ls -lh out/arch/arm64/boot/Image
           else
             echo "❌ 编译失败!"
             tail -100 out/build.log
@@ -108,7 +115,7 @@ jobs:
       - name: 上传内核
         uses: actions/upload-artifact@v4
         with:
-          name: Image.gz-ares-KernelSU
+          name: Image.gz-ares-SUSFS
           path: kernel/out/arch/arm64/boot/Image.gz
           retention-days: 7
 
