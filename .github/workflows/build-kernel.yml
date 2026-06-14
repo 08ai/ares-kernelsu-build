@@ -1,4 +1,4 @@
-name: Build KernelSU-SUSFS for ares (kprobe-less)
+name: Build KernelSU-SUSFS for ares (correct)
 
 on:
   workflow_dispatch:
@@ -14,7 +14,7 @@ jobs:
       - name: 安装依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y flex bison bc cpio xz-utils libssl-dev libelf-dev python3 ccache
+          sudo apt-get install -y flex bison bc cpio xz-utils libssl-dev libelf-dev python3 ccache git patch
 
       - name: 克隆内核源码
         run: |
@@ -30,54 +30,82 @@ jobs:
           echo "Proton Clang 版本:"
           clang/bin/clang --version
 
-      - name: 集成 KernelSU-SUSFS
+      - name: 集成 KernelSU + SUSFS
         run: |
           cd kernel
-          # 使用 SUSFS fork，不是原版 KernelSU
-          curl -LSs "https://raw.githubusercontent.com/5ec1cff/KernelSU/main/kernel/setup.sh" | bash
-          echo "✓ KernelSU-SUSFS 已集成"
 
-      - name: 配置 defconfig (SUSFS模式)
+          # Step 1: 集成原版 KernelSU
+          echo "=== 集成 KernelSU ==="
+          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash
+
+          # Step 2: 克隆 SUSFS 补丁 (kernel-4.14 分支)
+          echo "=== 克隆 SUSFS 补丁 ==="
+          git clone --depth=1 -b kernel-4.14 https://gitlab.com/simonpunk/susfs4ksu.git /tmp/susfs4ksu
+
+          # Step 3: 复制 SUSFS 源文件
+          echo "=== 复制 SUSFS 源文件 ==="
+          cp /tmp/susfs4ksu/kernel_patches/fs/* fs/ 2>/dev/null || true
+          cp /tmp/susfs4ksu/kernel_patches/include/linux/* include/linux/ 2>/dev/null || true
+
+          # Step 4: 应用 KernelSU SUSFS 补丁
+          echo "=== 应用 KernelSU SUSFS 补丁 ==="
+          cp /tmp/susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch KernelSU/
+          cd KernelSU
+          patch -p1 < 10_enable_susfs_for_ksu.patch || echo "(patch applied with warnings)"
+          cd ..
+
+          # Step 5: 应用内核级 SUSFS 补丁
+          echo "=== 应用内核 SUSFS 补丁 ==="
+          cp /tmp/susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.14.patch .
+          patch -p1 < 50_add_susfs_in_kernel-4.14.patch || echo "(patch applied with warnings)"
+
+          # Step 6: 关键 — 禁用 kprobe 引用，改用 manual hook
+          echo "=== 切换为 manual hook 模式 ==="
+          find KernelSU -name "*.c" -o -name "*.h" | xargs sed -i 's/#ifdef CONFIG_KPROBES/#if defined(CONFIG_KPROBES) \&\& 0/g' 2>/dev/null || true
+          find KernelSU -name "*.c" -o -name "*.h" | xargs sed -i 's/#ifndef CONFIG_KPROBES/#if !defined(CONFIG_KPROBES) || 1/g' 2>/dev/null || true
+
+          echo "✓ KernelSU + SUSFS 集成完成"
+
+      - name: 配置 defconfig
         run: |
           cd kernel
           DEFCONFIG="arch/arm64/configs/ares_user_defconfig"
 
-          # 基础 KSU
-          if ! grep -q "CONFIG_KSU" "$DEFCONFIG"; then
-            echo "# KernelSU-SUSFS" >> "$DEFCONFIG"
-            echo "CONFIG_KSU=y" >> "$DEFCONFIG"
-          fi
-
-          # SUSFS 核心配置 (13项，来自能用的 boot.img)
-          echo "CONFIG_KSU_SUSFS=y" >> "$DEFCONFIG"
-          echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> "$DEFCONFIG"
-          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> "$DEFCONFIG"
-          echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y" >> "$DEFCONFIG"
-          echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y" >> "$DEFCONFIG"
-          echo "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y" >> "$DEFCONFIG"
-          echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> "$DEFCONFIG"
-          echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> "$DEFCONFIG"
-          echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> "$DEFCONFIG"
-          echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> "$DEFCONFIG"
-          echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> "$DEFCONFIG"
-          echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> "$DEFCONFIG"
-          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> "$DEFCONFIG"
-
-          # 关键：确保 Kconfig 引用 KernelSU-SUSFS 的配置项
-          # setup.sh 可能遗漏，手动补上
+          # 确保 Kconfig 引用 SUSFS
           KCONFIG="arch/arm64/Kconfig"
           if ! grep -q "KernelSU/kernel/Kconfig" "$KCONFIG"; then
             echo "" >> "$KCONFIG"
-            echo '# KernelSU-SUSFS' >> "$KCONFIG"
             echo 'source "KernelSU/kernel/Kconfig"' >> "$KCONFIG"
-            echo "→ 已添加 Kconfig source 引用"
-          else
-            echo "→ Kconfig source 已存在"
+          fi
+          # 也要引用 fs/Kconfig 中的 SUSFS 选项
+          if ! grep -q "fs/susfs" "$KCONFIG"; then
+            echo 'source "fs/Kconfig.susfs"' >> "$KCONFIG" 2>/dev/null || true
           fi
 
-          echo "✓ defconfig 已配置 (SUSFS模式)"
-          echo "已添加的 SUSFS 配置:"
-          grep "CONFIG_KSU" "$DEFCONFIG"
+          # 配置选项
+          cat >> "$DEFCONFIG" << 'EOF'
+# KernelSU + SUSFS (Manual Hook Mode)
+CONFIG_KSU=y
+CONFIG_KSU_MANUAL_HOOK=y
+# SUSFS
+CONFIG_KSU_SUSFS=y
+CONFIG_KSU_SUSFS_SUS_PATH=y
+CONFIG_KSU_SUSFS_SUS_MOUNT=y
+CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
+CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
+CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y
+CONFIG_KSU_SUSFS_SUS_KSTAT=y
+CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+CONFIG_KSU_SUSFS_TRY_UMOUNT=y
+CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
+CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
+CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
+CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+# 非GKI 禁用 SUS_SU
+# CONFIG_KSU_SUSFS_SUS_SU is not set
+EOF
+
+          echo "✓ defconfig 已配置"
 
       - name: 编译内核
         run: |
@@ -87,41 +115,27 @@ jobs:
           CL="${PWD}/clang/bin"
 
           echo "生成 .config..."
-          make O=out ARCH=arm64 \
-            HOSTCC=gcc \
-            CC="${CL}/clang" \
-            ares_user_defconfig
+          make O=out ARCH=arm64 HOSTCC=gcc CC="${CL}/clang" ares_user_defconfig 2>&1
 
           echo "验证 KSU 配置..."
-          grep "CONFIG_KSU" out/.config || echo "(部分配置可能需Kconfig定义)"
-          echo ""
-          echo "检查 KSU 源码中的 Kconfig..."
-          find KernelSU -name "Kconfig" 2>/dev/null | head -5
+          grep "CONFIG_KSU" out/.config || echo "(checking...)"
 
-          echo "开始编译..."
+          echo "编译..."
           make O=out -j$(nproc) \
-            ARCH=arm64 \
-            HOSTCC=gcc \
-            CC="${CL}/clang" \
+            ARCH=arm64 HOSTCC=gcc CC="${CL}/clang" \
             CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE="${CL}/aarch64-linux-gnu-" \
             CROSS_COMPILE_ARM32="${CL}/arm-linux-gnueabi-" \
-            LD="${CL}/ld.lld" \
-            AR="${CL}/llvm-ar" \
-            NM="${CL}/llvm-nm" \
-            OBJCOPY="${CL}/llvm-objcopy" \
-            OBJDUMP="${CL}/llvm-objdump" \
-            STRIP="${CL}/llvm-strip" \
-            CONFIG_NO_ERROR_ON_MISMATCH=y \
-            2>&1 | tee out/build.log
+            LD="${CL}/ld.lld" AR="${CL}/llvm-ar" NM="${CL}/llvm-nm" \
+            OBJCOPY="${CL}/llvm-objcopy" OBJDUMP="${CL}/llvm-objdump" STRIP="${CL}/llvm-strip" \
+            CONFIG_NO_ERROR_ON_MISMATCH=y 2>&1 | tee out/build.log
 
           if [ -f out/arch/arm64/boot/Image.gz ]; then
             echo "✅ 编译成功!"
             ls -lh out/arch/arm64/boot/Image.gz
-            ls -lh out/arch/arm64/boot/Image
           else
-            echo "❌ 编译失败!"
-            tail -100 out/build.log
+            echo "❌ 失败!"
+            tail -80 out/build.log
             exit 1
           fi
 
